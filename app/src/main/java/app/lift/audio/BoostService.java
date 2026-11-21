@@ -23,6 +23,10 @@ public final class BoostService extends Service {
     private static final Set<Runnable> stateListeners = new LinkedHashSet<>();
     private static boolean active;
     private static String problem;
+    private static BoostService running;
+    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable updateNotification = () ->
+        getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification());
     private LoudnessEnhancer effect;
 
     static boolean isActive() { return active; }
@@ -36,7 +40,12 @@ public final class BoostService extends Service {
 
     static void setGain(Context context, int gain) {
         context.getSharedPreferences("lift", MODE_PRIVATE).edit().putInt("gainPercent", gain).apply();
-        if (active) setEnabled(context, true);
+        if (active && running != null) running.applyLiveGain();
+    }
+
+    @Override public void onCreate() {
+        super.onCreate();
+        running = this;
     }
 
     static void setEnabled(Context context, boolean enable) {
@@ -75,7 +84,7 @@ public final class BoostService extends Service {
                 });
             }
             if (!effect.hasControl()) throw new IllegalStateException("Audio effect has no control");
-            effect.setTargetGain((int) Math.round(2_000 * Math.log10(gain(this) / 100.0)));
+            setEffectGain();
             int result = effect.setEnabled(true);
             if (result != AudioEffect.SUCCESS || !effect.getEnabled()) {
                 throw new IllegalStateException("Audio effect did not enable");
@@ -91,6 +100,22 @@ public final class BoostService extends Service {
             stopSelf();
         }
         return START_NOT_STICKY;
+    }
+
+    private void applyLiveGain() {
+        try {
+            setEffectGain();
+            mainHandler.removeCallbacks(updateNotification);
+            mainHandler.postDelayed(updateNotification, 120);
+            publishState();
+        } catch (RuntimeException error) {
+            problem = "Android couldn’t change the boost level.";
+            stopSelf();
+        }
+    }
+
+    private void setEffectGain() {
+        effect.setTargetGain((int) Math.round(2_000 * Math.log10(gain(this) / 100.0)));
     }
 
     private Notification notification() {
@@ -111,6 +136,8 @@ public final class BoostService extends Service {
     }
 
     @Override public void onDestroy() {
+        running = null;
+        mainHandler.removeCallbacks(updateNotification);
         releaseEffect();
         active = false;
         stopForeground(STOP_FOREGROUND_REMOVE);

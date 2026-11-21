@@ -3,24 +3,25 @@ package app.lift.audio;
 import android.Manifest;
 import android.app.Activity;
 import android.app.StatusBarManager;
+import android.content.ActivityNotFoundException;
 import android.content.ComponentName;
+import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
-import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 public final class MainActivity extends Activity {
     private static final int BACKGROUND = Color.rgb(16, 21, 17);
@@ -30,13 +31,23 @@ public final class MainActivity extends Activity {
     private static final int INK = Color.rgb(238, 247, 233);
     private static final int MUTED = Color.rgb(174, 194, 170);
     private static final int WARM = Color.rgb(255, 204, 154);
+    private static final int INSTALL_ACCESS = 2;
 
     private TextView status;
     private TextView boost;
     private static final int[] LEVELS = {125, 150, 200, 300, 400};
     private final TextView[] presets = new TextView[LEVELS.length];
     private TextView tileHint;
-    private Meter meter;
+    private GainBezel meter;
+    private LinearLayout updateBanner;
+    private TextView updateLabel;
+    private TextView updateAction;
+    private TextView checkUpdates;
+    private LiftUpdate.Release availableUpdate;
+    private boolean checkingUpdate;
+    private boolean downloading;
+    private boolean readyToInstall;
+    private String downloadedVersion;
     private final Runnable stateListener = () -> render(BoostService.gain(this));
 
     @Override public void onCreate(Bundle state) {
@@ -82,14 +93,14 @@ public final class MainActivity extends Activity {
         logo.setAccessibilityHeading(true);
         add(column, logo, 1);
         add(column, label("Media boost", 17, MUTED, "sans-serif"), 21);
+        addUpdateBanner(column);
 
         LinearLayout panel = vertical();
         panel.setPadding(dp(18), dp(18), dp(18), dp(18));
         panel.setBackground(shape(SURFACE, LINE, 28));
         add(column, panel, 12);
-        meter = new Meter();
-        meter.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        panel.addView(meter, new LinearLayout.LayoutParams(-1, dp(177)));
+        meter = new GainBezel(this, LINE, PRIMARY, INK, MUTED, this::setGain);
+        panel.addView(meter, new LinearLayout.LayoutParams(-1, dp(204)));
 
         status = label("", 14, MUTED, "sans-serif");
         status.setGravity(Gravity.CENTER);
@@ -116,10 +127,17 @@ public final class MainActivity extends Activity {
         add(column, addTile, 4);
         tileHint = label("Tap the tile to toggle. Touch and hold to open Lift.", 13, MUTED, "sans-serif");
         tileHint.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        add(column, tileHint, 0);
+        add(column, tileHint, 9);
+        checkUpdates = action("Check for updates", BACKGROUND, MUTED);
+        checkUpdates.setMinHeight(dp(48));
+        checkUpdates.setOnClickListener(view -> checkForUpdate(true));
+        add(column, checkUpdates, 0);
 
         setContentView(scroll);
         render(BoostService.gain(this));
+        readyToInstall = state != null && state.getBoolean("readyToInstall") && LiftUpdate.apk(this).isFile();
+        downloadedVersion = state == null ? null : state.getString("downloadedVersion");
+        checkForUpdate(false);
     }
 
     @Override protected void onStart() {
@@ -131,6 +149,128 @@ public final class MainActivity extends Activity {
     @Override protected void onStop() {
         BoostService.removeStateListener(stateListener);
         super.onStop();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        state.putBoolean("readyToInstall", readyToInstall);
+        state.putString("downloadedVersion", downloadedVersion);
+        super.onSaveInstanceState(state);
+    }
+
+    private void addUpdateBanner(LinearLayout column) {
+        updateBanner = new LinearLayout(this);
+        updateBanner.setGravity(Gravity.CENTER_VERTICAL);
+        updateBanner.setPadding(dp(12), dp(7), dp(7), dp(7));
+        updateBanner.setBackground(shape(Color.rgb(36, 55, 32), Color.rgb(74, 110, 60), 18));
+        updateBanner.setVisibility(View.GONE);
+        updateLabel = label("", 14, INK, "sans-serif-medium");
+        updateLabel.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(0, -2, 1);
+        labelParams.setMarginEnd(dp(8));
+        updateBanner.addView(updateLabel, labelParams);
+        updateAction = action("Update", PRIMARY, BACKGROUND);
+        updateAction.setMinHeight(dp(48));
+        updateAction.setOnClickListener(view -> installOrDownload());
+        updateBanner.addView(updateAction, new LinearLayout.LayoutParams(-2, -2));
+        add(column, updateBanner, 12);
+    }
+
+    private void checkForUpdate(boolean userInitiated) {
+        if (checkingUpdate || downloading) return;
+        checkingUpdate = true;
+        checkUpdates.setEnabled(false);
+        var context = getApplicationContext();
+        LiftUpdate.IO.execute(() -> {
+            try {
+                LiftUpdate.Release result = LiftUpdate.check(context, userInitiated);
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    checkingUpdate = false;
+                    checkUpdates.setEnabled(true);
+                    if (result != null && !result.version.equals(downloadedVersion)) {
+                        readyToInstall = false;
+                    }
+                    availableUpdate = result;
+                    showUpdateBanner();
+                    if (userInitiated && result == null) Toast.makeText(this, "Lift is up to date.", Toast.LENGTH_SHORT).show();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    checkingUpdate = false;
+                    checkUpdates.setEnabled(true);
+                    if (userInitiated) Toast.makeText(this, "Couldn’t check for updates. Try again.", Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+    }
+
+    private void showUpdateBanner() {
+        updateBanner.setVisibility(availableUpdate == null ? View.GONE : View.VISIBLE);
+        if (availableUpdate == null) return;
+        updateLabel.setText("Lift " + availableUpdate.version + " available");
+        updateAction.setText(readyToInstall ? "Install" : "Update");
+        updateAction.setEnabled(true);
+    }
+
+    private void installOrDownload() {
+        if (availableUpdate == null || downloading) return;
+        if (readyToInstall && LiftUpdate.apk(this).isFile()) {
+            openInstaller();
+            return;
+        }
+        downloading = true;
+        updateAction.setEnabled(false);
+        checkUpdates.setEnabled(false);
+        updateLabel.setText("Downloading update…");
+        LiftUpdate.Release release = availableUpdate;
+        var context = getApplicationContext();
+        LiftUpdate.IO.execute(() -> {
+            try {
+                LiftUpdate.download(context, release);
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    downloading = false;
+                    readyToInstall = true;
+                    downloadedVersion = release.version;
+                    checkUpdates.setEnabled(true);
+                    showUpdateBanner();
+                    if (hasWindowFocus()) openInstaller();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    if (isDestroyed()) return;
+                    downloading = false;
+                    checkUpdates.setEnabled(true);
+                    showUpdateBanner();
+                    updateLabel.setText("Update couldn’t be verified or downloaded.");
+                    updateAction.setText("Retry");
+                });
+            }
+        });
+    }
+
+    private void openInstaller() {
+        if (!LiftUpdate.apk(this).isFile()) return;
+        try {
+            if (!getPackageManager().canRequestPackageInstalls()) {
+                Intent access = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    android.net.Uri.parse("package:" + getPackageName()));
+                startActivityForResult(access, INSTALL_ACCESS);
+                return;
+            }
+            Intent install = new Intent(Intent.ACTION_VIEW);
+            install.setDataAndType(LiftUpdate.apkUri(this), UpdateFileProvider.APK_MIME);
+            install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(install);
+        } catch (ActivityNotFoundException | SecurityException error) {
+            updateLabel.setText("Android couldn’t open the installer.");
+        }
+    }
+
+    @Override protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (request == INSTALL_ACCESS && getPackageManager().canRequestPackageInstalls()) openInstaller();
     }
 
     private void toggleBoost() {
@@ -179,16 +319,18 @@ public final class MainActivity extends Activity {
             TextView preset = action(level + "%", SURFACE, INK);
             preset.setMinHeight(dp(48));
             preset.setPadding(dp(4), dp(6), dp(4), dp(6));
-            preset.setOnClickListener(view -> {
-                BoostService.setGain(this, level);
-                render(level);
-            });
+            preset.setOnClickListener(view -> setGain(level));
             LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, -2, 1);
             if (index + 1 < end) params.setMarginEnd(dp(8));
             row.addView(preset, params);
             presets[index] = preset;
         }
         add(levels, row, 8);
+    }
+
+    private void setGain(int percent) {
+        BoostService.setGain(this, percent);
+        render(percent);
     }
 
     private void render(int percent) {
@@ -200,6 +342,7 @@ public final class MainActivity extends Activity {
         for (int index = 0; index < presets.length; index++) {
             TextView preset = presets[index];
             boolean selected = LEVELS[index] == percent;
+            if (preset.isSelected() == selected) continue;
             preset.setSelected(selected);
             preset.setTextColor(selected ? BACKGROUND : INK);
             preset.setBackground(new RippleDrawable(ColorStateList.valueOf(0x20789869),
@@ -254,45 +397,4 @@ public final class MainActivity extends Activity {
         parent.addView(child, params);
     }
 
-    private final class Meter extends View {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF track = new RectF();
-        private int gain;
-        private boolean active;
-
-        Meter() {
-            super(MainActivity.this);
-            paint.setTextAlign(Paint.Align.CENTER);
-            paint.setStrokeCap(Paint.Cap.ROUND);
-        }
-
-        void update(int percent, boolean enabled) {
-            gain = percent;
-            active = enabled;
-            invalidate();
-        }
-
-        @Override protected void onDraw(Canvas canvas) {
-            super.onDraw(canvas);
-            float cx = getWidth() * .5f;
-            float cy = getHeight() * .52f;
-            float r = Math.min(getWidth() * .40f, getHeight() * .45f);
-            track.set(cx - r, cy - r, cx + r, cy + r);
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(dp(6));
-            paint.setColor(LINE);
-            canvas.drawArc(track, 140, 260, false, paint);
-            paint.setColor(active ? PRIMARY : MUTED);
-            canvas.drawArc(track, 140, ((gain - 100) / 300f) * 260, false, paint);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setTypeface(Typeface.create("sans-serif-light", Typeface.NORMAL));
-            paint.setTextSize(r * .58f);
-            paint.setColor(INK);
-            canvas.drawText(gain + "%", cx, cy + r * .13f, paint);
-            paint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            paint.setTextSize(r * .24f);
-            paint.setColor(MUTED);
-            canvas.drawText("TARGET", cx, cy + r * .47f, paint);
-        }
-    }
 }
