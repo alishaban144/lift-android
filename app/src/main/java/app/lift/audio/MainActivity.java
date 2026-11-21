@@ -3,11 +3,7 @@ package app.lift.audio;
 import android.Manifest;
 import android.app.Activity;
 import android.app.StatusBarManager;
-import android.content.BroadcastReceiver;
 import android.content.ComponentName;
-import android.content.Context;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
@@ -41,9 +37,7 @@ public final class MainActivity extends Activity {
     private final TextView[] presets = new TextView[LEVELS.length];
     private TextView tileHint;
     private Meter meter;
-    private final BroadcastReceiver receiver = new BroadcastReceiver() {
-        @Override public void onReceive(Context context, Intent intent) { render(BoostService.gain(context)); }
-    };
+    private final Runnable stateListener = () -> render(BoostService.gain(this));
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -130,14 +124,12 @@ public final class MainActivity extends Activity {
 
     @Override protected void onStart() {
         super.onStart();
-        IntentFilter filter = new IntentFilter(BoostService.STATE_CHANGED);
-        if (Build.VERSION.SDK_INT >= 33) registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED);
-        else registerReceiver(receiver, filter);
+        BoostService.addStateListener(stateListener);
         render(BoostService.gain(this));
     }
 
     @Override protected void onStop() {
-        unregisterReceiver(receiver);
+        BoostService.removeStateListener(stateListener);
         super.onStop();
     }
 

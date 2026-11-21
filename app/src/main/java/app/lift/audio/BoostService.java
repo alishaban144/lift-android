@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
@@ -13,19 +12,23 @@ import android.media.audiofx.AudioEffect;
 import android.media.audiofx.LoudnessEnhancer;
 import android.os.Build;
 import android.os.IBinder;
-import android.service.quicksettings.TileService;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.Set;
 
 public final class BoostService extends Service {
-    static final String STATE_CHANGED = "app.lift.audio.BOOST_STATE_CHANGED";
     private static final String STOP = "app.lift.audio.STOP";
     private static final String CHANNEL = "active_boost";
     private static final int NOTIFICATION_ID = 1;
+    private static final Set<Runnable> stateListeners = new LinkedHashSet<>();
     private static boolean active;
     private static String problem;
     private LoudnessEnhancer effect;
 
     static boolean isActive() { return active; }
     static String problem() { return problem; }
+    static void addStateListener(Runnable listener) { stateListeners.add(listener); }
+    static void removeStateListener(Runnable listener) { stateListeners.remove(listener); }
 
     static int gain(Context context) {
         return Math.max(100, Math.min(400, context.getSharedPreferences("lift", MODE_PRIVATE).getInt("gainPercent", 125)));
@@ -44,7 +47,7 @@ public final class BoostService extends Service {
             else context.stopService(intent);
         } catch (RuntimeException error) {
             problem = "Android could not start the boost. Try again from Lift.";
-            publishState(context);
+            publishState();
         }
     }
 
@@ -79,12 +82,12 @@ public final class BoostService extends Service {
             }
             problem = null;
             active = true;
-            publishState(this);
+            publishState();
         } catch (RuntimeException error) {
             problem = "This device or output does not allow media boost.";
             active = false;
             releaseEffect();
-            publishState(this);
+            publishState();
             stopSelf();
         }
         return START_NOT_STICKY;
@@ -111,7 +114,7 @@ public final class BoostService extends Service {
         releaseEffect();
         active = false;
         stopForeground(STOP_FOREGROUND_REMOVE);
-        publishState(this);
+        publishState();
         super.onDestroy();
     }
 
@@ -122,9 +125,8 @@ public final class BoostService extends Service {
         previous.release();
     }
 
-    private static void publishState(Context context) {
-        context.sendBroadcast(new Intent(STATE_CHANGED).setPackage(context.getPackageName()));
-        TileService.requestListeningState(context, new ComponentName(context, BoostTile.class));
+    private static void publishState() {
+        for (Runnable listener : new ArrayList<>(stateListeners)) listener.run();
     }
 
     @Override public IBinder onBind(Intent intent) { return null; }
