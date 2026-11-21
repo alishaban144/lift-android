@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">Lift</string>
+    <string name="tile_label">Media boost</string>
+    <style name="Theme.Lift" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#CAFD88</item>
+        <item name="android:windowBackground">#101511</item>
+        <item name="android:statusBarColor">#101511</item>
+        <item name="android:navigationBarColor">#101511</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+    </style>
+</resources>
