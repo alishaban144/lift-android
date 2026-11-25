@@ -9,9 +9,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.media.audiofx.AudioEffect;
+import android.media.audiofx.DynamicsProcessing;
 import android.media.audiofx.LoudnessEnhancer;
 import android.os.Build;
 import android.os.IBinder;
+import android.util.Log;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.Set;
@@ -27,7 +29,7 @@ public final class BoostService extends Service {
     private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
     private final Runnable updateNotification = () ->
         getSystemService(NotificationManager.class).notify(NOTIFICATION_ID, notification());
-    private LoudnessEnhancer effect;
+    private AudioEffect effect;
 
     static boolean isActive() { return active; }
     static String problem() { return problem; }
@@ -73,21 +75,15 @@ public final class BoostService extends Service {
                 startForeground(NOTIFICATION_ID, notification);
             }
             if (effect == null) {
-                // Some Android builds expose the output mix to legacy audio effects.
-                // Android reserves the right to restrict this session.
-                effect = new LoudnessEnhancer(0);
+                effect = createEffect(gain(this));
                 effect.setControlStatusListener((changed, controlled) -> {
                     if (!controlled && effect == changed) {
                         problem = "Another audio effect took control of the output.";
                         stopSelf();
                     }
                 });
-            }
-            if (!effect.hasControl()) throw new IllegalStateException("Audio effect has no control");
-            setEffectGain();
-            int result = effect.setEnabled(true);
-            if (result != AudioEffect.SUCCESS || !effect.getEnabled()) {
-                throw new IllegalStateException("Audio effect did not enable");
+            } else {
+                enableEffect(effect, gain(this));
             }
             problem = null;
             active = true;
@@ -115,7 +111,55 @@ public final class BoostService extends Service {
     }
 
     private void setEffectGain() {
-        effect.setTargetGain((int) Math.round(2_000 * Math.log10(gain(this) / 100.0)));
+        applyGain(effect, gain(this));
+    }
+
+    private static AudioEffect createEffect(int percent) {
+        AudioEffect candidate = null;
+        try {
+            // Separate broadband gain from peak control. Quiet and mid-level
+            // material get the selected gain until the peak limiter engages.
+            DynamicsProcessing.Config config = new DynamicsProcessing.Config.Builder(
+                DynamicsProcessing.VARIANT_FAVOR_FREQUENCY_RESOLUTION, 2,
+                false, 0, false, 0, false, 0, true).setPreferredFrameDuration(10f).build();
+            candidate = new DynamicsProcessing(0, 0, config);
+            enableEffect(candidate, percent);
+            Log.i("LiftBoost", "Using DynamicsProcessing on the media mix");
+            return candidate;
+        } catch (RuntimeException unsupported) {
+            if (candidate != null) candidate.release();
+            Log.i("LiftBoost", "DynamicsProcessing unavailable on the media mix", unsupported);
+        }
+
+        candidate = new LoudnessEnhancer(0);
+        try {
+            enableEffect(candidate, percent);
+            Log.i("LiftBoost", "Using LoudnessEnhancer on the media mix");
+            return candidate;
+        } catch (RuntimeException unsupported) {
+            candidate.release();
+            throw unsupported;
+        }
+    }
+
+    private static void enableEffect(AudioEffect candidate, int percent) {
+        if (!candidate.hasControl()) throw new IllegalStateException("Audio effect has no control");
+        applyGain(candidate, percent);
+        if (candidate.setEnabled(true) != AudioEffect.SUCCESS || !candidate.getEnabled()) {
+            throw new IllegalStateException("Audio effect did not enable");
+        }
+    }
+
+    private static void applyGain(AudioEffect effect, int percent) {
+        float gainDb = (float) (20 * Math.log10(percent / 100.0));
+        if (effect instanceof DynamicsProcessing dynamics) {
+            // Use one linked limiter for all output channels to preserve stereo balance.
+            dynamics.setLimiterAllChannelsTo(new DynamicsProcessing.Limiter(
+                true, percent > 100, 0, 1.0f, 120.0f, 20.0f, -3.0f, 0.0f));
+            dynamics.setInputGainAllChannelsTo(gainDb);
+        } else {
+            ((LoudnessEnhancer) effect).setTargetGain(Math.round(100 * gainDb));
+        }
     }
 
     private Notification notification() {
@@ -147,7 +191,7 @@ public final class BoostService extends Service {
 
     private void releaseEffect() {
         if (effect == null) return;
-        LoudnessEnhancer previous = effect;
+        AudioEffect previous = effect;
         effect = null;
         previous.release();
     }
